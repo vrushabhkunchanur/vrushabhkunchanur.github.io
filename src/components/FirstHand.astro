@@ -1,10 +1,15 @@
 ---
 // Marks a passage as a first-hand measurement or observation from a production deployment,
 // so readers and answer engines can tell it apart from general guidance.
+interface Props {
+  label?: string;
+}
+
+const { label = 'From my deployment' } = Astro.props;
 ---
 
 <aside class="first-hand border-l-4 border-tape py-1 pl-4">
-  <p class="font-semibold">From my deployment</p>
+  <p class="font-semibold">{label}</p>
   <div class="mt-1 [&>*+*]:mt-3">
     <slot />
   </div>

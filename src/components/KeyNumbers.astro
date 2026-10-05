@@ -1,0 +1,92 @@
+---
+// A row of headline measurements for a post, in the same readout style as the home page hero.
+interface Item {
+  value: string;
+  label: string;
+}
+
+interface Props {
+  caption: string;
+  items: Item[];
+}
+
+const { caption, items } = Astro.props;
+---
+
+<figure class="key-numbers">
+  <ul class="key-grid" role="list">
+    {
+      items.map((item) => (
+        <li class="key-item">
+          <p class="key-value">{item.value}</p>
+          <div class="key-scale" aria-hidden="true" />
+          <p class="key-label">{item.label}</p>
+        </li>
+      ))
+    }
+  </ul>
+  <figcaption class="mt-4 text-sm text-graphite">{caption}</figcaption>
+</figure>
+
+<style>
+  .key-numbers {
+    margin-block: 2rem;
+  }
+
+  @media (min-width: 48rem) {
+    .key-numbers {
+      width: min(55rem, calc(100vw - 18rem));
+    }
+  }
+
+  /* Overrides the .prose list bullets, indent and sibling spacing. */
+  .key-grid {
+    list-style: none;
+    padding-left: 0;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1.5rem 1.25rem;
+  }
+
+  @media (min-width: 48rem) {
+    .key-grid {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+  }
+
+  .key-item {
+    margin-top: 0;
+  }
+
+  .key-value {
+    font-size: var(--text-3xl);
+    font-weight: 800;
+    font-stretch: 75%;
+    line-height: 1;
+    font-variant-numeric: tabular-nums lining-nums;
+    white-space: nowrap;
+  }
+
+  .key-item:first-child .key-value {
+    box-shadow: inset 0 -0.3em 0 var(--tape);
+    width: fit-content;
+  }
+
+  /* Same measuring scale as the hero readouts: baseline, minor ticks every 8px, major every 40px. */
+  .key-scale {
+    height: 10px;
+    margin-top: 0.6rem;
+    background:
+      linear-gradient(var(--ink), var(--ink)) bottom / 100% 1px no-repeat,
+      repeating-linear-gradient(to right, var(--ink) 0 1px, transparent 1px 40px) bottom / 100% 10px
+        no-repeat,
+      repeating-linear-gradient(to right, var(--graphite) 0 1px, transparent 1px 8px) bottom / 100%
+        4px no-repeat;
+  }
+
+  .key-label {
+    margin-top: 0.6rem;
+    font-size: var(--text-sm);
+    color: var(--graphite);
+  }
+</style>

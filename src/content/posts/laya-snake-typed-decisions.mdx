@@ -1,0 +1,310 @@
+---
+title: I let a 322M-parameter model play Snake. Random noise beat it 2:1.
+metaTitle: 'A 322M decision model played Snake. Random noise won.'
+description: A 322M-parameter encoder chose every Snake move in 71 ms on a 4 GB laptop GPU. Random noise scored twice the apples because the safety shield did the real work.
+question: can a small local ai model make safe real-time decisions
+answer: A 322M-parameter typed-decision encoder chose every Snake move in 71 ms on a 4 GB laptop GPU, with zero generated tokens and bit-identical outputs. It still played badly. Uniform random noise scored twice as many apples, because a deterministic safety shield did the real choosing. Measure the shield as a policy, not as a guardrail.
+publishedAt: 2026-10-05
+tags:
+  - laya
+  - typed-decisions
+  - ai-safety
+  - enterprise-ai
+  - cuda
+  - edge-inference
+takeaways:
+  - With encoder decision models, the shape of the input is part of the model; fixing two prompt mistakes cut illegal top picks from 82% to 5%.
+  - A safety shield is a policy, so measure how often it overrules the model; random noise outscored the model 10.0 to 5.0 apples because the shield did the choosing.
+  - Batch every question into one forward pass; three questions cost 71 ms in one call, against about 107 ms more as three separate calls.
+  - Put search, math and facts in deterministic code, give the model only the judgement call, and say where that line is.
+  - Run the dumbest baseline; without random noise as a baseline, the model would have looked like it was helping.
+firstHandBasis: Every number in this post comes from my own Laya Snake benchmark on an RTX 3050 Laptop GPU (4 GB), over seeds 101, 202, 303 and 404, and is reproducible from the project's artifacts folder.
+faqs:
+  - q: What is a typed-decision model?
+    a: A typed-decision model is an encoder that takes a state and a few typed questions, such as pick one of these options or answer yes or no, and returns probabilities in one forward pass. It generates no text, so there is no decoding loop and nothing to parse.
+  - q: Why did random noise beat the AI model at Snake?
+    a: Random noise picked an unsafe move first 64% of the time, so the safety shield overruled it and effectively played the game. The model's first pick was safe 84% of the time, so its own safe but unproductive preferences were executed, and it scored 5.0 apples per 300 steps against 10.0.
+  - q: How fast is Laya on a 4 GB laptop GPU?
+    a: On an RTX 3050 Laptop GPU, one batched call answering three questions took 71 ms at the median in fp16, using 633 MiB of video memory. The same call took 328 ms on the CPU in fp32, 17 times slower on real 611-token prompts.
+  - q: Is the adaptive risk mode guaranteed to avoid deaths?
+    a: No. Adaptive risk uses a one-step lookahead, so a chain of individually survivable moves can still end in death. No deaths occurred in 2,400 measured steps, but that is not a proof. The strict cycle shield is provably death-free and is restored with the --no-risk flag.
+sources:
+  - title: Laya on the Python Package Index
+    url: https://pypi.org/project/laya/
+---
+
+import Figure from '@/components/Figure.astro';
+import FirstHand from '@/components/FirstHand.astro';
+import KeyNumbers from '@/components/KeyNumbers.astro';
+import pipeline from '@/assets/posts/laya-snake/01_pipeline.png';
+import promptAblation from '@/assets/posts/laya-snake/02_prompt_ablation.png';
+import policyComparison from '@/assets/posts/laya-snake/03_policy_comparison.png';
+import latency from '@/assets/posts/laya-snake/04_latency.png';
+import stageBreakdown from '@/assets/posts/laya-snake/05_stage_breakdown.png';
+import adaptiveRisk from '@/assets/posts/laya-snake/06_adaptive_risk.png';
+import headHeatmap from '@/assets/posts/laya-snake/07_head_heatmap.png';
+import enterpriseArchitecture from '@/assets/posts/laya-snake/08_enterprise_architecture.png';
+import roadmap from '@/assets/posts/laya-snake/09_roadmap.png';
+
+I built a small demo: a game of Snake where **a local AI model, running on a laptop GPU, picks every move**. A terminal dashboard shows the model's probabilities, its latency, and every time a safety layer overrules it.
+
+The model does not play well. That turned out to be the most useful thing about the project. Every number in it has a definition, a caveat, and a command that reproduces it. Taken together, the numbers say a lot about how AI decision systems should be built, well beyond Snake.
+
+<KeyNumbers
+  caption="Headline results. RTX 3050 Laptop GPU (4 GB), 4 seeds per configuration."
+  items={[
+    { value: '71 ms', label: 'Median decision latency, fp16, three questions in one call' },
+    { value: '0', label: 'Tokens generated per decision; one forward pass, no decoding' },
+    { value: '90% → 5%', label: 'Illegal top picks, first prompt to shipped prompt' },
+    { value: '2 : 1', label: 'Apples scored by random noise against the model, both shielded' },
+  ]}
+/>
+
+This post covers what I built, what I measured, the three results that surprised me, and how this pattern could grow into something enterprises run in production.
+
+## What is a typed-decision model, and how does the Snake demo use one?
+
+A typed-decision model is an encoder that answers typed questions, such as *pick one of these options* or *yes or no*, with calibrated probabilities. [Laya](https://pypi.org/project/laya/) is one. In the demo, it judges between Snake moves that deterministic code has already analysed, and a safety layer has the final say.
+
+Laya is an encoder, not a chatbot:
+
+- **One forward pass. Zero generated tokens.** There is no decoding loop, no sampling, and no text to parse. The `output_tokens` counter in my dashboard is literally hardcoded to `0` by the library. That is why it decides in tens of milliseconds where a similar-sized LLM (large language model) would still be writing.
+- **Deterministic.** Five repeats of the same prompt gave bit-identical probabilities on CUDA at fp16, bf16 and fp32 (16-bit float, bfloat16 and 32-bit float), and on CPU.
+- **Fully offline.** `HF_HUB_OFFLINE=1` is set before any import. No game move can reach the internet.
+
+I used the multilingual checkpoint (mmBERT-base, about 322M parameters) on an **RTX 3050 Laptop GPU with 4 GB**, about 1.8 GB of which Windows already holds for the desktop. That is a constrained machine, on purpose.
+
+<Figure
+  n={1}
+  src={pipeline}
+  alt="Five boxes left to right: game state, planner, Laya encoder, safety shield, move. The encoder makes one forward pass with three questions and zero output tokens in about 71 ms; the shield keeps only moves that provably cannot kill the snake."
+  caption="One decision, end to end. The encoder outputs direction probabilities, dead-end risk and food reachability; the shield may overrule it, and the displayed bars stay raw."
+/>
+
+Each move goes through four stages:
+
+1. **Planner (deterministic code).** BFS (breadth-first search) distance to the food, flood-filled free space after each candidate move, and positions along a precomputed Hamiltonian cycle. It writes its findings as short phrases.
+2. **Laya (the model).** It reads those phrases and answers three questions in one batched call: *which direction?*, *is there a dead-end risk?*, *is the food reachable?*
+3. **Shield (deterministic code).** It removes any move that could provably kill the snake. If it overrules the model, the move is marked `SHIELD`, and **the displayed probability bars stay the model's raw output, unedited.**
+4. **Recorder.** Every step goes to a JSONL (JSON Lines) file that can be replayed.
+
+I want to be explicit about one boundary, because most AI demos blur it: **this is a feature-assisted decision loop, not a model that has learned Snake.** The planner does the spatial reasoning. The model judges between the options it is shown.
+
+## How fast is one decision on a 4 GB laptop GPU?
+
+One decision takes 71 ms at the median (p50) in fp16 on the RTX 3050 Laptop GPU, with three questions answered in a single forward pass. The forward pass is nearly the whole budget: the planner, prompt building and tokenisation together add about 10 ms.
+
+<FirstHand label="From my measurements">
+
+| Variant | p50 latency | VRAM (video memory) |
+| --- | --- | --- |
+| **fp16 (default)** | **71 ms** | 633 MiB |
+| bf16 | 80 ms | 633 MiB |
+| fp32 (library default) | 87 ms | 1,255 MiB |
+| CPU fp32 | 328 ms | n/a |
+
+</FirstHand>
+
+<Figure
+  n={2}
+  src={latency}
+  alt="Left: histogram of per-decision latency over a 600-step game, mostly between 62 and 100 ms, with p50 at 77 ms and p90 at 96 ms. Right: median latency by precision and device: fp16 71 ms, bf16 80 ms, fp32 87 ms, CPU fp32 328 ms."
+  caption="Latency per decision. The histogram is one live 600-step game (p50 77 ms, p99 127 ms); the bars are the benchmark medians in the table above."
+/>
+
+<Figure
+  n={3}
+  src={stageBreakdown}
+  alt="Stacked bar of median time per stage in an 80 ms decision: encoder forward 69.6 ms (87%), planner 6.4 ms, prompt building 2.1 ms, tokenisation 1.9 ms."
+  caption="Where 80 ms goes. Nearly all of it is one encoder forward pass."
+/>
+
+Timing each stage separately is the same first step I recommend for [slow ONNX models on a Raspberry Pi](/blog/onnx-slower-on-raspberry-pi). Four things I learned about running this model on small hardware:
+
+- **Batching is the main speedup.** One question costs 59 ms and three cost 71 ms, so each extra question adds about 6 ms. Three separate calls would add about 107 ms per move. Each move therefore makes exactly one `predict()` call.
+- **fp16 was more accurate than bf16 here, as well as faster.** Measured against a CPU fp32 reference, fp16 drifted by 0.0001 and bf16 by 0.005, even though the checkpoint declares bf16.
+- **Peak VRAM, not steady-state VRAM, decides whether a model loads.** Loading straight onto the GPU peaked at about 1.6 GB for a model that settles at 633 MiB. Casting on the CPU first fixed that.
+- **Microbenchmarks flatter CPUs.** A synthetic test made the CPU look 4.6x slower than the GPU. Real game prompts of about 611 tokens made it **17x** slower.
+
+## Does the wording of the options matter more than the model?
+
+Yes. In this demo, the wording of the options moved the illegal-move rate from 90% to 5% on the same model and the same positions. My first prompt was catastrophic: on **254 of 300 moves** the model picked the illegal move with probability 1.0, so it would have driven straight into its own body.
+
+Before changing any wording, I ruled out the two boring explanations:
+
+- **Position bias?** No. Shuffling the option order left the same illegal direction at p = 1.0.
+- **A mapping bug?** No. Blanking the descriptions restored a normal spread of probabilities.
+
+So I compared nine wordings over 40 real positions:
+
+<Figure
+  n={4}
+  src={promptAblation}
+  alt="Bar chart of nine prompt wordings and the share of positions where the model's top pick was the illegal move: from 90% for the first draft down to 45% with a uniform template, 38% with one word per option, and 5% for the shipped prompt. Chance is 25%."
+  caption="Prompt ablation over 40 real positions, multilingual checkpoint, CUDA fp16. Lower is better; chance is 25%."
+/>
+
+Chance is 25%. My first draft was **much worse than chance**, and the shipped prompt is **much better than chance**. Two mistakes caused the gap, and both were mine:
+
+1. **The fatal option looked different from the others.** Three options read `"legal, food 11 steps away, 379 free cells"`. The fourth read `"illegal, hits the snake body at (12,8)"`, with a different shape, length, and vocabulary. The model picked the option that looked unlike the rest. Giving every option the same five fields in the same order cut illegal picks from 82% to 45%.
+2. **The descriptions appeared in the prompt twice.** Removing the duplicate cut illegal picks from 45% to **5%** and raised agreement with the planner from 12% to 45%.
+
+> **Takeaway:** with encoder decision models, the shape of the input is part of the model. A uniform schema works better than descriptive prose.
+
+## Why did random noise beat the model?
+
+Random noise beat the model because the safety shield, not the proposer, was choosing most moves. Random's first choice was unsafe so often that the shield overruled it constantly and played a good game on its behalf. The model's first choice was usually safe, so its own unproductive preferences were executed.
+
+I benchmarked eleven configurations, each over 4 seeds of 300 steps:
+
+<Figure
+  n={5}
+  src={policyComparison}
+  alt="Left: apples per 300 steps by policy: pure planner 11.0, greedy baseline 10.2, random noise 10.0, Laya with shield 5.0, cycle only 2.0, Laya unassisted 0.2. Right: share of moves where the shield overruled the proposer: planner 21%, greedy 52%, random 64%, Laya 16%, cycle 0%."
+  caption="Policy comparison, mean and standard deviation over 4 seeds. Laya unassisted died 8 times per 300 steps; every shielded configuration had 0 deaths."
+/>
+
+<FirstHand label="From my measurements">
+
+**Uniform random noise scored twice as many apples as the model**: 10.0 against 5.0 per 300 steps.
+
+</FirstHand>
+
+The right-hand panel explains why. Random's first choice is unsafe **64%** of the time, so the shield overrules it constantly, and in practice the *shield* is playing. The model's first choice is safe **84%** of the time, so its own preference gets executed. Among the safe moves, the model consistently picks ones that are safe but make no progress toward the food.
+
+The model is reading the board. It agrees with the planner 48% of the time, against 28% for random. Its judgement just isn't productive. That leads to an uncomfortable finding: **a proposer that defers more to the safety layer can outperform one with its own opinions.**
+
+The rest of the table settles several other questions:
+
+- **The shield does all the survival work.** Without the shield, the model dies 8 times per 300 steps, about once every 35 steps. Every shielded configuration, including random noise, had **zero deaths**.
+- **Bigger was not better.** The 421M English checkpoint scored 4.8 apples against 5.0 for the multilingual one, and was 49% slower.
+- **Precision did not change any decisions.** fp16, fp32 and CPU made the exact same moves in every seed.
+
+Here is what the model's play looks like on the board:
+
+<Figure
+  n={6}
+  src={headHeatmap}
+  alt="Heatmap of a 24 by 16 board showing how often the snake's head visited each cell over 600 moves with seed 101. Visits are spread evenly in long horizontal bands, with six apples eaten."
+  caption="Where the snake's head went in 600 moves, seed 101, Laya with shield. Long laps around the cycle, few shortcuts to food."
+/>
+
+The snake makes long, orderly laps along the safe cycle and rarely takes a shortcut to the food. That is the "safe but slow" behaviour from the table, shown directly.
+
+## Should risk tolerance depend on how full the board is?
+
+Yes. A 6-cell snake on a 384-cell board can take shortcuts that would kill a 100-cell snake. So I added an **adaptive risk** mode. While the board is sparse, a move that breaks the strict cycle rule is allowed if it passes four checks:
+
+1. it is legal,
+2. it leaves enough connected space for the body plus a reserve,
+3. the tail is still reachable afterwards, and
+4. it reaches the food **sooner than the best safe move**.
+
+As the board fills up, the risk allowance falls to zero.
+
+<Figure
+  n={7}
+  src={adaptiveRisk}
+  alt="Grouped bars of apples per 600 steps under the strict cycle shield and adaptive risk: pure planner 21.2 to 41.0, greedy 22.5 to 38.8, Laya 7.8 to 8.5, random 20.0 to 13.2. Zero deaths in every row."
+  caption="Strict shield against adaptive risk, 600 steps by 4 seeds. Loosening the shield helps whoever can actually choose."
+/>
+
+<FirstHand label="From my measurements">
+
+**Under the strict rule, exactly one move was allowed 71% of the time.** For most moves, the shield wasn't constraining the proposer. It was choosing the move itself.
+
+</FirstHand>
+
+So loosening the rule really means handing control back to whatever is proposing moves. The planner nearly doubled its score with that control. Random noise lost a third of its score, because it had nothing useful to choose with.
+
+The fourth check took three attempts. Without it, random noise collapsed to 0.5 apples. A risky move has to beat the safe route, not just be allowed.
+
+The trade-off is real. The strict mode is *provably* death-free. Adaptive mode uses a one-step lookahead, so a chain of individually survivable moves can still end in death. No deaths occurred in 2,400 measured steps, but that does not prove they can't. `--no-risk` restores the provable mode.
+
+## What would I tell someone building one of these?
+
+Keep the model's job small, measure everything around it, and never let the display lie. These six rules came directly out of the results above:
+
+1. **Draw the line between computation and judgement, and say where it is.** Put the search, the math and the facts in deterministic code. Give the model only the judgement call.
+2. **Treat input shape as part of the model.** Use the same fields, in the same order, for every option, and never include a description twice.
+3. **The safety layer is a policy, so measure it like one.** If you don't measure how often it overrules the model, you can't tell whether the model is doing anything.
+4. **Run the dumbest baseline.** Without the random-noise baseline, I would have assumed the model was helping.
+5. **Never edit the model's output for display.** The shield changes which move is played, not what the model said.
+6. **Report `n/a`, not `0`.** A missing measurement and a measured zero are different facts.
+
+## Where could typed decisions go in the enterprise?
+
+Typed decisions fit business choices that need a fast, deterministic, auditable pick from a known set of options, made close to the data. None of what follows is production-ready today. It is a hopeful look ahead, but every piece of it is the Snake loop with a different board.
+
+<Figure
+  n={8}
+  src={enterpriseArchitecture}
+  alt="Enterprise version of the Snake loop: signals such as tickets, sensor feeds and transactions flow into a deterministic feature layer, then a typed decision model on an on-prem GPU, then a policy shield of hard invariants, then an action that auto-executes or escalates to a human. An audit and learning loop logs every input, probability and override and feeds calibration back to the model."
+  caption="The Snake loop, renamed for an enterprise. Same four parts as the demo; only the board changed."
+/>
+
+Most business decisions don't need a chatbot. They need a **fast, deterministic, auditable choice** from a known set of options, made close to the data:
+
+| Snake demo | Enterprise equivalent |
+| --- | --- |
+| Board state | Ticket, transaction, sensor reading, order |
+| Planner (BFS, flood fill) | Rules engines, SQL, graph search, domain heuristics |
+| `choice` question over 4 moves | Route / approve / hold / escalate |
+| `yes/no` questions | "Is this fraud?", "Is this SLA at risk?" |
+| Cycle-safety shield | Compliance rules, spend limits, safety interlocks |
+| JSONL recorder | Audit trail regulators can replay |
+| "Zero deaths with shield" | "Zero policy violations by construction" |
+
+### Which use cases fit this pattern?
+
+- **IT operations triage.** Monitoring data and runbooks go in. The model picks one action: *restart, scale, roll back, or page a human*. The shield blocks anything that touches production during a change freeze.
+- **Claims and ticket routing.** The model sends each case to one of N queues. It runs on-prem, so personal data never leaves the building, and it uses no generated text, so there is nothing to hallucinate.
+- **Warehouse and robotics edge decisions.** A sub-100 ms decision on a Jetson-class device, with a hard safety envelope the model cannot override. This is the closest match to Snake.
+- **Fraud and payment holds.** `yes/no` questions with calibrated confidence. A model judgement handles the grey zone, and the rules engine still decides the clear cases.
+- **Manufacturing quality gates.** Sensor features go in, and the model returns *pass / rework / scrap*. Every decision is replayable for root-cause analysis.
+
+### Why does this pattern fit enterprises?
+
+- **Cost and speed.** One forward pass on a 4 GB GPU, with no per-token billing and nothing to stream.
+- **Privacy.** Fully offline. Data stays on the machine that made the decision.
+- **Auditability.** Typed inputs and typed outputs. The same input gives bit-identical output, and every override is logged with a reason.
+- **Safety by construction.** The model ranks the options and the shield guarantees the invariants, so a bad model costs efficiency rather than causing a compliance incident. Snake demonstrates this directly: the weakest proposer still had zero deaths.
+
+### What has to be true first?
+
+My own results set the requirements:
+
+- **Calibration against real outcomes.** I never checked whether "dead-end risk 0.8" means an 80% chance of death. An enterprise would need reliability diagrams and drift monitoring before trusting any confidence score.
+- **Domain fine-tuning.** An off-the-shelf model ranked safe moves worse than random. Without tuning, the model is the weakest part of the system.
+- **Schema discipline.** Wording alone changed the illegal-move rate from 90% to 5%. Option templates need versioning, tests and review, like code.
+- **Measuring how often the shield overrules the model.** If the shield is making most of the decisions, the model is adding cost without adding value.
+
+### What does a realistic roadmap look like?
+
+<Figure
+  n={9}
+  src={roadmap}
+  alt="Timeline with five stages: today, the Snake demo; next, shadow mode; then, assisted; later, bounded autonomy; hopeful, a decision fabric of small typed models at the edge."
+  caption="From a game to a decision fabric."
+/>
+
+1. **Shadow mode.** The model runs alongside human decision-makers and decides nothing. Every call is logged, and agreement and calibration are measured.
+2. **Assisted.** The model ranks options, the shield filters them, and a human clicks approve.
+3. **Bounded autonomy.** The system executes on its own inside the shield and escalates anything outside it.
+4. **A decision fabric.** Fleets of small typed models at the edge, one per decision type, each with its own shield and audit trail, coordinated by deterministic code rather than by one large model trying to do everything.
+
+The idea I find most promising: **we don't need one giant model that does everything. We need many small, fast, honest decision-makers, each wrapped in rules it cannot break.** My Snake demo does that badly, on a laptop. With enough engineering, the same structure could do it well at enterprise scale.
+
+## How do you reproduce these results?
+
+Every chart and table in this post regenerates from the project with four commands. The benchmark writes its raw results to the project's `artifacts/` folder, and one script redraws every figure.
+
+```powershell
+cd laya-snake-cuda
+python -m uv run laya-snake                 # live dashboard
+python -m uv run laya-snake --unassisted    # no shield, watch it die
+python -m uv run laya-snake bench           # regenerate the full ablation table
+python ../blog/make_figures.py              # regenerate every chart in this post
+```
+
+Measured on an RTX 3050 Laptop GPU (4 GB), Ryzen 7 7435HS, torch 2.14.0+cu126, laya 0.3.20. Board 24x16, seeds 101/202/303/404. All numbers come from the project's `artifacts/` folder. None are estimates.
