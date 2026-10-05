@@ -6,3 +6,7 @@ dist/
 !.env.example
 *.log
 .DS_Store
+
+# Local AI-assistant instructions; not part of the site
+AGENTS.md
+CLAUDE.md
