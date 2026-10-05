@@ -1,0 +1,79 @@
+---
+// A numbered chart or diagram. Charts carry small axis labels, so on wide screens the figure
+// breaks out of the 68ch text measure to the full content column, and links to full resolution.
+import type { ImageMetadata } from 'astro';
+import { Image, getImage } from 'astro:assets';
+
+interface Props {
+  src: ImageMetadata;
+  alt: string;
+  caption: string;
+  n: number;
+}
+
+const { src, alt, caption, n } = Astro.props;
+const full = await getImage({ src, format: 'webp' });
+---
+
+<figure class="figure">
+  <a class="figure-frame" href={full.src} aria-label={`Open figure ${n} at full size`}>
+    <Image
+      src={src}
+      alt={alt}
+      widths={[640, 1000, 1500, 2000].filter((w) => w <= src.width)}
+      sizes="(min-width: 48rem) min(55rem, calc(100vw - 18rem)), calc(100vw - 2rem)"
+      format="webp"
+      loading="lazy"
+    />
+  </a>
+  <figcaption class="figure-caption">
+    <span class="figure-index">Fig. {String(n).padStart(2, '0')}</span>
+    <span>{caption}</span>
+  </figcaption>
+</figure>
+
+<style>
+  .figure {
+    margin-block: 2rem;
+  }
+
+  @media (min-width: 48rem) {
+    .figure {
+      width: min(55rem, calc(100vw - 18rem));
+    }
+  }
+
+  /* The charts are drawn on a fixed off-white, so the frame keeps that colour in both themes. */
+  .figure-frame {
+    display: block;
+    padding: clamp(0.5rem, 1.5vw, 1rem);
+    background: #fcfcfb;
+    border: 1px solid var(--rule);
+    border-top: 3px solid var(--ink);
+    transition: border-color 150ms ease;
+  }
+
+  .figure-frame:hover {
+    border-color: var(--dimension);
+  }
+
+  .figure-frame :global(img) {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+
+  .figure-caption {
+    display: flex;
+    gap: 0.75rem;
+    margin-top: 0.6rem;
+    color: var(--graphite);
+    font-size: var(--text-sm);
+  }
+
+  .figure-index {
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+    color: var(--dimension);
+  }
+</style>
